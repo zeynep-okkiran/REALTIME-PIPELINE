@@ -1,3 +1,7 @@
+# Local configuration. Not tracked: it is per-machine (ports, symbols) and is the
+# natural place for credentials later. Copy .env.example to .env to get started.
+.env
+
 # Pipeline output (temporary, generated data)
 output/
 checkpoint/

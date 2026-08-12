@@ -58,6 +58,46 @@ services:
     restart: "no"
 
   # --------------------------------------------------------------------------
+  # Spark Structured Streaming — reads the topic and (from step 5 on) writes to
+  # Mongo and to output/live_ohlc.jsonl.
+  #
+  # Spark runs in a container rather than on the host on purpose: PySpark
+  # checkpointing on Windows needs winutils.exe/hadoop.dll, which would also
+  # break the "copy the folder to Linux and run" goal.
+  # --------------------------------------------------------------------------
+  spark:
+    image: apache/spark:4.0.0
+    container_name: rtp-spark
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      # Explicitly the INTERNAL listener, NOT ${KAFKA_BOOTSTRAP}: that variable
+      # points at localhost:29092 for the producer running on the host.
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_TOPIC: ${KAFKA_TOPIC}
+    volumes:
+      # Job source: editing it locally only needs "docker compose restart spark"
+      - ./spark:/app
+      # Ivy cache for --packages, so the connector jars are downloaded once
+      - ./.ivy:/opt/spark/.ivy2
+      - ./checkpoint:/app/checkpoint
+      - ./output:/app/output
+    # Given as a LIST for the same reason as kafka-init: a string command would
+    # be re-split by Compose.
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - local[2]
+      - --packages
+      - org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.0
+      # Pin the Ivy home so it resolves to the bind-mounted cache above
+      - --conf
+      - spark.jars.ivy=/opt/spark/.ivy2
+      - /app/stream_job.py
+    restart: "no"
+
+  # --------------------------------------------------------------------------
   # MongoDB — the NoSQL sink of the pipeline.
   # Host port is 27018: the machine's native MongoDB 8.2 service already owns
   # 27017 and we leave it completely alone.

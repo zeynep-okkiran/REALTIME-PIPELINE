@@ -1,0 +1,7 @@
+# HTTP client for the Binance public REST API
+requests>=2.32
+
+# Kafka client. confluent-kafka (librdkafka) is used instead of kafka-python:
+# kafka-python has known incompatibilities with Python 3.13, while confluent-kafka
+# ships prebuilt wheels for both Windows and Linux.
+confluent-kafka>=2.6
