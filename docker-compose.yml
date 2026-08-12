@@ -1,0 +1,97 @@
+services:
+  # --------------------------------------------------------------------------
+  # Kafka — KRaft mode (no Zookeeper), single node.
+  #
+  # Two listeners are defined on purpose:
+  #   INTERNAL (kafka:9092)      -> other containers (spark, producer, kafka-ui)
+  #   EXTERNAL (localhost:29092) -> dev scripts running on the host
+  # A single listener would not let the host connect: the broker advertises its
+  # own address, so the client would try to resolve "kafka:9092" and hang.
+  # --------------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:3.9.1
+    container_name: rtp-kafka
+    ports:
+      - "${KAFKA_EXTERNAL_PORT}:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:${KAFKA_EXTERNAL_PORT}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      # Single node, so every internal topic uses replication factor 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # The kafka-init service creates the topic with a controlled partition count
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 20s
+
+  # --------------------------------------------------------------------------
+  # One-shot service that creates the topic idempotently (--if-not-exists).
+  # Runs on every "docker compose up" and leaves an existing topic untouched,
+  # so the topic does not have to be recreated by hand after "down -v".
+  # --------------------------------------------------------------------------
+  kafka-init:
+    image: apache/kafka:3.9.1
+    container_name: rtp-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-euc"]
+    # command is given as a LIST (single element): when given as a string,
+    # Compose splits it into shell-like words, so "sh -c" takes only the first
+    # word as the script and binds the rest to $0/$1 -> script runs with no args.
+    command:
+      - |
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic ${KAFKA_TOPIC} --partitions ${KAFKA_PARTITIONS} --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --describe --topic ${KAFKA_TOPIC}
+    restart: "no"
+
+  # --------------------------------------------------------------------------
+  # MongoDB — the NoSQL sink of the pipeline.
+  # Host port is 27018: the machine's native MongoDB 8.2 service already owns
+  # 27017 and we leave it completely alone.
+  # --------------------------------------------------------------------------
+  mongo:
+    image: mongo:8
+    container_name: rtp-mongo
+    ports:
+      - "${MONGO_PORT}:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ping:1})"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # --------------------------------------------------------------------------
+  # Kafka UI — browse topics and messages from the browser (debug only, the
+  # pipeline does not depend on it).
+  # --------------------------------------------------------------------------
+  kafka-ui:
+    image: kafbat/kafka-ui:latest
+    container_name: rtp-kafka-ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "${KAFKA_UI_PORT}:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      DYNAMIC_CONFIG_ENABLED: "true"
+
+volumes:
+  mongo-data:

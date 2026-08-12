@@ -1,0 +1,12 @@
+# Pipeline output (temporary, generated data)
+output/
+checkpoint/
+
+# Connector jars downloaded by Spark
+.ivy/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
