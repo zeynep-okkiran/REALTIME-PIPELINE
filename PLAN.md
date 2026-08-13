@@ -230,6 +230,18 @@ Plandan iki sapma:
 2. **`local[2]` → `local[4]`.** İki thread'le mikro-batch sürekli 5 sn'lik tetiklemeyi aşıyordu
    (5.4–5.6 sn, "batch is falling behind" uyarısı). Dörde çıkınca 36 batch'te 1 uyarı kaldı;
    Adım 5'te eklenecek sink'ler için de pay bırakıyor.
+3. **Watermark 30 sn → 10 sn.** Producer `fromId` ile sırayla çektiği için kayıtlar neredeyse
+   hiç geç kalmıyor; 30 sn gereksiz cömertti ve sonuç gecikmesinin en büyük kalemiydi.
+   10 sn ile 55 pencerede **hiç kayıt düşmedi** (Kafka 557 = Spark 557).
+
+**Ölçülen uçtan uca gecikme** (pencere kapandıktan sonra sonucun yayınlanmasına kadar):
+en düşük 23.3 sn, ortalama **26.3 sn**, en yüksek 29.1 sn.
+
+Bunun 10 saniyesi watermark; kalanı Spark'ın mikro-batch mekaniği: pencerenin kapanması için
+watermark'ı aşan bir olayın *görülmesi* gerekiyor, bir batch'te hesaplanan watermark ancak
+*bir sonraki* batch'te uygulanıyor, üstüne tetikleme aralığı ve batch süresi biniyor. Yani
+watermark'ı düşürmek gecikmeyi birebir düşürüyor ama tabana inmiyor — Spark'ın taban gecikmesi
+tetikleme aralığının 2-3 katı civarında.
 
 Log okurken dikkat: console sink batch başına en fazla `numRows` satır **basar**, fazlasını
 sessizce atar (`only showing top 20 rows`). Yayınlanan pencere sayısı ile basılan satır sayısı

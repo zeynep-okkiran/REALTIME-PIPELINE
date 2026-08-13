@@ -33,10 +33,14 @@ KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092")
 KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "binance.trades.raw")
 
 WINDOW_DURATION = "5 seconds"
-# How long to keep a window open for late arrivals. The producer polls every
-# 2 seconds, so 30 seconds is generous; it also caps how much state Spark has
-# to keep in memory.
-WATERMARK_DELAY = "30 seconds"
+# How long to keep a window open for late arrivals, and therefore the main
+# component of end-to-end latency: a window is only emitted this long after it
+# closes. The producer walks fromId sequentially and polls every 2 seconds, so
+# records arrive in order and barely late; 10 seconds is five times that
+# headroom. The one case it does not cover is a symbol whose polling backs off
+# for longer than this while the other symbols keep advancing the watermark --
+# those trades would be dropped from their window.
+WATERMARK_DELAY = "10 seconds"
 
 # Explicit schema instead of inference: schema inference is not available for
 # streaming sources, and pinning the types here means a malformed record turns
