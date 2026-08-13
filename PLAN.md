@@ -12,8 +12,8 @@
 | 2 | Producer: Binance REST → Kafka | ✅ Tamam, doğrulandı |
 | 3 | Spark job iskeleti (uçtan uca akış) | ✅ Tamam, doğrulandı |
 | 4 | Transform: şema + pencereli agregasyon | ✅ Tamam, doğrulandı |
-| 5 | Sink: MongoDB + geçici JSON dosyası | ⏭️ Sıradaki |
-| 6 | Tam containerize + Linux'a taşıma | ⏳ Bekliyor |
+| 5 | Sink: MongoDB + geçici JSON dosyası | ✅ Tamam, doğrulandı |
+| 6 | Tam containerize + Linux'a taşıma | ⏭️ Sıradaki |
 
 ---
 
@@ -251,7 +251,7 @@ aynı şey değil — ilk batch'te dünden kalan yüzlerce pencere kapandığı 
 
 ---
 
-## Adım 5 — Sink: MongoDB + geçici JSON dosyası
+## Adım 5 — Sink: MongoDB + geçici JSON dosyası ✅
 
 Tek bir `foreachBatch` fonksiyonu ile **her iki hedefe** yazılır. `mongo-spark-connector`
 jar'ı yerine `foreachBatch` + `pymongo` tercih ediliyor: bir bağımlılık ve bir sürü
@@ -285,11 +285,35 @@ idempotent upsert bunu effectively-once'a çevirir).
   `part-00000-*.json` gibi onlarca parça dosya üretir; istenen ise tek, okunabilir, canlı
   büyüyen bir dosya
 
-**Doğrulama:**
-- `docker compose exec mongo mongosh realtime --eval "db.trade_ohlc.countDocuments()"` artıyor
-- `Get-Content output\live_ohlc.jsonl -Tail 5 -Wait` ile satırların canlı düştüğü görülüyor
-- Spark container'ı `restart` edilip aynı pencereler yeniden işlendiğinde Mongo'daki
-  doküman sayısı **artmıyor** (idempotency kanıtı)
+**Doğrulama sonuçları** — checkpoint sıfırlanıp **tüm topic yeniden işlendi**:
+
+| | Önce | Sonra | Artış |
+|---|---|---|---|
+| Mongo dokümanı | 538 | 842 | **+304** (sadece gerçekten yeni pencereler) |
+| JSONL satırı | 937 | 1779 | **+842** (yeniden işlenenler dahil hepsi) |
+
+JSONL'de 1779 satır var ama **842 tekil pencere** — yani 937 mükerrer satır. Mongo'daki
+doküman sayısı **tam 842**, tekil pencere sayısıyla birebir. `_id = symbol|window_start`
+upsert'ü at-least-once teslimi effectively-once'a çeviriyor; JSONL ise tasarımı gereği
+append-only, geçici çıktı olduğu için mükerrer satır kabul ediliyor.
+
+Batch aralıkları temiz 5.0 sn (pencere üretmeyen batch'lerde 10 sn, bu yavaşlık değil).
+
+### Plandan üç sapma
+
+1. **`spark/Dockerfile` eklendi.** Stok `apache/spark:4.0.0` imajında `pymongo` yok.
+   Küçük bir katman: `pip3 install pymongo` + checkpoint mount noktasının uid 185'e
+   devredilmesi.
+2. **Checkpoint bind mount değil, named volume (`spark-checkpoint`).** `./checkpoint`
+   bind mount'uyla batch'ler 5 sn yerine **8–13 sn** sürüyordu — Spark her mikro-batch'te
+   offset/state dosyalarını yeniden yazıyor ve bunu Windows dosya sistemi sınırının ötesinde
+   yapmak pahalı. `/tmp`'e alıp ölçünce süre tam 5.0 sn'ye oturdu, sebep doğrulandı.
+   Checkpoint zaten host'tan okunması gereken bir şey değil; `output/` bind mount olarak
+   kalıyor çünkü asıl amaç o dosyayı görebilmek.
+3. **Checkpoint `/app`'ın altında değil, `/checkpoint`'te.** İki sebep: named volume `root`
+   sahipliğiyle oluşup uid 185'in yazmasını engelliyordu (`mkdir ... failed`), ayrıca `/app`
+   zaten bind mount olduğu için altına ikinci bir mount yerleştirmek kırılgan. Dockerfile
+   içinde `/checkpoint` uid 185'e verilince volume ilk oluşumda bu sahipliği devralıyor.
 
 → **DUR, commit.**
 
@@ -331,9 +355,11 @@ realtime-pipeline/
 │  ├─ requirements.txt
 │  └─ producer.py
 ├─ spark/
+│  ├─ Dockerfile
 │  └─ stream_job.py
-├─ output/             (gitignore — geçici JSON çıktısı)
-└─ checkpoint/         (gitignore — Spark offset state)
+└─ output/             (gitignore — geçici JSON çıktısı)
+
+Spark checkpoint'i repoda değil, `spark-checkpoint` named volume'ünde tutulur.
 ```
 
 Producer ve Spark job'ı birer dosya olarak kalır; adım adım genişletilir, yeni dosya açılmaz.

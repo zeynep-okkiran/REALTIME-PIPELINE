@@ -1,17 +1,18 @@
-"""Spark Structured Streaming job: Kafka -> 5-second OHLC/VWAP -> (step 4) console.
+"""Spark Structured Streaming job: Kafka -> 5-second OHLC/VWAP -> Mongo + JSONL.
 
 Reads raw aggregated trades from Kafka, parses them with an explicit schema and
 folds them into one row per symbol per 5-second window: trade count, volume,
-VWAP and the four OHLC prices.
-
-Step 5 replaces the console sink with MongoDB + output/live_ohlc.jsonl.
+VWAP and the four OHLC prices. Each finished window is written to MongoDB and
+appended to a JSON Lines file.
 
 Runs inside the container defined as the `spark` service, so it talks to the
 broker over the INTERNAL listener (kafka:9092).
 """
 
+import json
 import os
 
+from pymongo import MongoClient, UpdateOne
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, count, from_json
 from pyspark.sql.functions import max as spark_max
@@ -31,6 +32,14 @@ from pyspark.sql.types import (
 
 KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092")
 KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "binance.trades.raw")
+
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb://mongo:27017")
+MONGO_DB = os.environ.get("MONGO_DB", "realtime")
+MONGO_COLLECTION = os.environ.get("MONGO_COLLECTION", "trade_ohlc")
+OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "/app/output/live_ohlc.jsonl")
+# Where Spark stores the committed Kafka offsets and the window state. With it
+# the query resumes where it left off instead of replaying the whole topic.
+CHECKPOINT_PATH = os.environ.get("CHECKPOINT_PATH", "/checkpoint/ohlc")
 
 WINDOW_DURATION = "5 seconds"
 # How long to keep a window open for late arrivals, and therefore the main
@@ -127,14 +136,56 @@ ohlc = (
     )
 )
 
+# foreachBatch runs on the driver, so a single client here is enough and is
+# reused across batches.
+collection = MongoClient(MONGO_URI)[MONGO_DB][MONGO_COLLECTION]
+
+
+def write_batch(batch_df, batch_id):
+    """Write one micro-batch to both sinks.
+
+    A single foreachBatch instead of two separate queries: the topic would
+    otherwise be read twice and the windows aggregated twice.
+    """
+    # Safe to collect: the aggregation already reduced each batch to a handful
+    # of rows, at most one per symbol per window.
+    rows = [row.asDict(recursive=True) for row in batch_df.collect()]
+    if not rows:
+        return
+
+    # Mongo, idempotent. foreachBatch is at-least-once: after a failure Spark
+    # may replay a batch. Keying on symbol + window start turns that into an
+    # overwrite of the same document rather than a duplicate.
+    collection.bulk_write(
+        [
+            UpdateOne(
+                {"_id": f"{row['symbol']}|{row['window_start'].isoformat()}"},
+                {"$set": row},
+                upsert=True,
+            )
+            for row in rows
+        ],
+        ordered=False,
+    )
+
+    # JSON Lines, append. Deliberately not writeStream.format("json"): the
+    # built-in sink spreads output over many part-*.json files, while what is
+    # wanted here is one readable file that grows live. Note this file is the
+    # one place a replayed batch does show up twice; Mongo stays correct.
+    with open(OUTPUT_PATH, "a", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, default=str) + "\n")
+
+    print(f"batch {batch_id}: wrote {len(rows)} windows", flush=True)
+
+
 query = (
     ohlc.writeStream
-    .format("console")
+    .foreachBatch(write_batch)
     # append needs the watermark: a window is emitted once only after the
     # watermark has passed its end, at which point the row is final.
     .outputMode("append")
-    .option("truncate", False)
-    .option("numRows", 20)
+    .option("checkpointLocation", CHECKPOINT_PATH)
     .trigger(processingTime="5 seconds")
     .start()
 )

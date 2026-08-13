@@ -66,22 +66,38 @@ services:
   # break the "copy the folder to Linux and run" goal.
   # --------------------------------------------------------------------------
   spark:
-    image: apache/spark:4.0.0
+    # Built rather than pulled: the stock image has no pymongo. See spark/Dockerfile.
+    build:
+      context: ./spark
+    image: rtp-spark:4.0.0
     container_name: rtp-spark
     depends_on:
       kafka:
+        condition: service_healthy
+      mongo:
         condition: service_healthy
     environment:
       # Explicitly the INTERNAL listener, NOT ${KAFKA_BOOTSTRAP}: that variable
       # points at localhost:29092 for the producer running on the host.
       KAFKA_BOOTSTRAP: kafka:9092
       KAFKA_TOPIC: ${KAFKA_TOPIC}
+      # Container-internal Mongo port; 27018 is only the host mapping
+      MONGO_URI: mongodb://mongo:27017
+      MONGO_DB: ${MONGO_DB}
+      MONGO_COLLECTION: ${MONGO_COLLECTION}
+      OUTPUT_PATH: /app/output/live_ohlc.jsonl
+      CHECKPOINT_PATH: /checkpoint/ohlc
     volumes:
       # Job source: editing it locally only needs "docker compose restart spark"
       - ./spark:/app
       # Ivy cache for --packages, so the connector jars are downloaded once
       - ./.ivy:/opt/spark/.ivy2
-      - ./checkpoint:/app/checkpoint
+      # Checkpoint is a named volume, not a bind mount, on purpose: Spark
+      # rewrites offset/state files on every micro-batch and doing that across
+      # the Windows filesystem boundary pushed batches from 5s to 8-13s. The
+      # checkpoint is opaque internal state, so nothing needs to read it from
+      # the host. The output file below stays a bind mount - it is the point.
+      - spark-checkpoint:/checkpoint
       - ./output:/app/output
     # Given as a LIST for the same reason as kafka-init: a string command would
     # be re-split by Compose.
@@ -137,3 +153,4 @@ services:
 
 volumes:
   mongo-data:
+  spark-checkpoint:
