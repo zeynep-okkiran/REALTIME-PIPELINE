@@ -87,8 +87,10 @@ services:
     # be re-split by Compose.
     command:
       - /opt/spark/bin/spark-submit
+      # 4 worker threads: with 2 the micro-batch consistently overran the
+      # 5-second trigger, leaving no headroom for the sinks added in step 5.
       - --master
-      - local[2]
+      - local[4]
       - --packages
       - org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.0
       # Pin the Ivy home so it resolves to the bind-mounted cache above

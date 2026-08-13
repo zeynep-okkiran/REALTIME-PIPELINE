@@ -11,8 +11,8 @@
 | 1 | İskelet + altyapı ayakta (compose, .env, topic) | ✅ Tamam, doğrulandı |
 | 2 | Producer: Binance REST → Kafka | ✅ Tamam, doğrulandı |
 | 3 | Spark job iskeleti (uçtan uca akış) | ✅ Tamam, doğrulandı |
-| 4 | Transform: şema + pencereli agregasyon | ⏭️ Sıradaki |
-| 5 | Sink: MongoDB + geçici JSON dosyası | ⏳ Bekliyor |
+| 4 | Transform: şema + pencereli agregasyon | ✅ Tamam, doğrulandı |
+| 5 | Sink: MongoDB + geçici JSON dosyası | ⏭️ Sıradaki |
 | 6 | Tam containerize + Linux'a taşıma | ⏳ Bekliyor |
 
 ---
@@ -192,7 +192,7 @@ Risk tablosundaki "Spark 4.0 ↔ kafka connector sürüm uyumsuzluğu" maddesi k
 
 ---
 
-## Adım 4 — Transform: şema + pencereli agregasyon
+## Adım 4 — Transform: şema + pencereli agregasyon ✅
 
 `stream_job.py` genişletilir (yeni dosya yok):
 
@@ -211,8 +211,29 @@ Risk tablosundaki "Spark 4.0 ↔ kafka connector sürüm uyumsuzluğu" maddesi k
 
 Bu adımda sink hâlâ `console` — agregasyon çıktısı gözle doğrulanır.
 
-**Doğrulama:** console'da her 5 sn'de sembol başına bir satır; VWAP değerleri high–low
-aralığında; `trade_count` toplamı producer'ın ürettiğiyle tutarlı.
+**Doğrulama sonuçları** (121 pencere, 3 sembol):
+
+| Kontrol | Sonuç |
+|---|---|
+| Pencere süresi | Hepsi tam **5 saniye** |
+| VWAP ∈ [low, high] | **0** aykırı satır |
+| first/last fiyat ∈ [low, high] | **0** aykırı satır |
+| Aynı pencerenin iki kez yayınlanması | **0** (append modu doğru çalışıyor) |
+| `trade_count` ↔ Kafka sayımı | Aynı zaman aralığında **1232 = 1232**, fark 0 |
+
+Plandan iki sapma:
+
+1. **`first_price`/`last_price` için `min_by`/`max_by`, `first()`/`last()` değil.** Streaming'de
+   `first()`/`last()` grup içi sıra garantisi vermez. Sıralama anahtarı olarak `trade_time`
+   yerine `trade_id` seçildi: aynı milisaniyede birden fazla işlem olabiliyor (veride görüldü),
+   `trade_id` ise sembol başına kesin artan.
+2. **`local[2]` → `local[4]`.** İki thread'le mikro-batch sürekli 5 sn'lik tetiklemeyi aşıyordu
+   (5.4–5.6 sn, "batch is falling behind" uyarısı). Dörde çıkınca 36 batch'te 1 uyarı kaldı;
+   Adım 5'te eklenecek sink'ler için de pay bırakıyor.
+
+Log okurken dikkat: console sink batch başına en fazla `numRows` satır **basar**, fazlasını
+sessizce atar (`only showing top 20 rows`). Yayınlanan pencere sayısı ile basılan satır sayısı
+aynı şey değil — ilk batch'te dünden kalan yüzlerce pencere kapandığı için bu fark görülür.
 
 → **DUR, commit.**
 
