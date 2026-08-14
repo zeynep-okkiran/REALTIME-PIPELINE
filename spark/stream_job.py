@@ -181,6 +181,8 @@ def write_batch(batch_df, batch_id):
 
 query = (
     ohlc.writeStream
+    # Names the query in the Spark UI's Structured Streaming tab
+    .queryName("binance-ohlc")
     .foreachBatch(write_batch)
     # append needs the watermark: a window is emitted once only after the
     # watermark has passed its end, at which point the row is final.

@@ -87,6 +87,10 @@ services:
       MONGO_COLLECTION: ${MONGO_COLLECTION}
       OUTPUT_PATH: /app/output/live_ohlc.jsonl
       CHECKPOINT_PATH: /checkpoint/ohlc
+    ports:
+      # Spark's own web UI: micro-batch durations, input rate, query plan.
+      # Only served while the driver is running.
+      - "${SPARK_UI_PORT}:4040"
     volumes:
       # Job source: editing it locally only needs "docker compose restart spark"
       - ./spark:/app

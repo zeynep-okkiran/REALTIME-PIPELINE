@@ -324,6 +324,13 @@ Batch aralıkları temiz 5.0 sn (pencere üretmeyen batch'lerde 10 sn, bu yavaş
 - `producer/Dockerfile` (`python:3.12-slim` + requirements) eklenir, producer compose'a
   servis olarak girer; `KAFKA_BOOTSTRAP` artık `kafka:9092`
 - Servis bağımlılıkları `depends_on` + healthcheck ile sıraya sokulur
+- **Plana ek: `restart: unless-stopped`.** Servisler şu an `restart: "no"` ile tanımlı.
+  13 Ağustos gecesi `rtp-spark` çöktü (`unable to send heartbeats to driver more than
+  60 times`, exit 56, OOM değil — container donmuş, büyük olasılıkla makine uykuya geçtiği
+  için) ve kimse geri başlatmadığı için 19 saat kapalı kaldı. Checkpoint sayesinde veri
+  kaybı olmadı, yeniden başlatınca kaldığı offset'ten devam etti — ama kendiliğinden
+  kalkması gerekirdi. "Tek komutla ayağa kalksın **ve çalışır kalsın**" hedefinin parçası.
+  `kafka-init` istisna: tek seferlik iş, `restart: "no"` kalmalı.
 - Tek komutla ayağa kalkış doğrulanır: `docker compose up -d`
 - Kısa bir `README.md`: mimari şeması, çalıştırma, durdurma, sıfırlama komutları
 - Linux notu: bind-mount edilen `output/` ve `checkpoint/` dizinlerinde root-owned dosya
