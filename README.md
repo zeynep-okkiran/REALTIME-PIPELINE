@@ -19,8 +19,13 @@ Spark Structured Streaming
       │   trade_count, volume, quote_volume, VWAP, open/high/low/close
       │
       ├──► MongoDB  realtime.trade_ohlc   _id = symbol|window_start (idempotent upsert)
+      │         │
+      │         └──► to_structured.py — schema-enforced Parquet, run on demand
       └──► output/live_ohlc.jsonl         append-only, one JSON object per line
 ```
+
+`CLAUDE.md` is the full reference: architecture, every design decision and the
+reason behind it, measured numbers, and the traps met along the way.
 
 ## Requirements
 
@@ -51,8 +56,9 @@ Lines appear three at a time — one per symbol — every 5 seconds.
 
 | Where | What |
 |---|---|
-| `output/live_ohlc.jsonl` | One JSON object per finished window, appended live |
+| `output/live_ohlc.jsonl` | One JSON object per finished window, appended live. A bounded tail — the newest `JSONL_MAX_LINES` rows, since MongoDB is the record of truth |
 | MongoDB `realtime.trade_ohlc` | The same windows, keyed for idempotent upsert |
+| `output/structured/` | Parquet + CSV with an enforced schema, once you run the batch job below |
 | http://localhost:8080 | Kafka UI — browse raw messages, partitions, broker health |
 | http://localhost:4040 | Spark UI — the `binance-ohlc` query, batch durations, input rate |
 
@@ -83,6 +89,7 @@ All of it lives in `.env`:
 | `KAFKA_EXTERNAL_PORT` | `29092` | Broker port for clients on the host |
 | `MONGO_PORT` | `27018` | Host port for Mongo (27017 is left alone) |
 | `MONGO_DB` / `MONGO_COLLECTION` | `realtime` / `trade_ohlc` | Write target |
+| `JSONL_MAX_LINES` | `10000` | Lines the JSONL tail keeps before older ones are trimmed |
 | `KAFKA_UI_PORT` / `SPARK_UI_PORT` | `8080` / `4040` | Web UIs |
 
 `.env` is not tracked. Adding a variable means adding it to `.env.example` too.
@@ -97,13 +104,29 @@ docker compose logs -f producer      # follow the Binance poller
 docker compose restart spark         # pick up an edit to spark/stream_job.py
 docker compose stop                  # stop, keep all data
 docker compose down                  # remove containers, keep volumes
-docker compose down -v               # remove volumes too: Mongo data and the
-                                     # Spark checkpoint are deleted
+docker compose down -v               # remove volumes too: the Kafka log, Mongo
+                                     # data and the Spark checkpoint all go
 ```
 
 `spark/stream_job.py` is bind-mounted, so editing it needs only a restart, not
 a rebuild. `producer.py` is baked into its image and needs
 `docker compose up -d --build producer`.
+
+### Mongo to structured Parquet
+
+MongoDB is schemaless, so what the pipeline writes there is still
+semi-structured. A separate batch job forces it through an explicit schema,
+checks it against the constraints the data should satisfy, and writes Parquet
+partitioned by symbol:
+
+```bash
+docker compose run --rm --no-deps spark \
+    /opt/spark/bin/spark-submit /app/to_structured.py
+```
+
+Output lands in `output/structured/` as Parquet and CSV, and the job exits
+non-zero if any constraint is violated. `CLAUDE.md` walks one real API call
+through every format on the way there.
 
 ### Starting over
 
@@ -116,21 +139,26 @@ docker compose up -d
 ## Layout
 
 ```
-docker-compose.yml     five services: kafka, kafka-init, producer, spark, mongo, kafka-ui
+docker-compose.yml     six services: kafka, kafka-init, producer, spark, mongo, kafka-ui
 .env / .env.example    all configuration
-PLAN.md                the six-step build plan, what was done, and why
+CLAUDE.md              full reference: architecture, every design decision and why,
+                       measured numbers, known traps, environment facts
 producer/
   producer.py          Binance REST -> Kafka
   requirements.txt     requests, confluent-kafka
   Dockerfile
 spark/
-  stream_job.py        Kafka -> 5s OHLC/VWAP -> Mongo + JSONL
+  stream_job.py        Kafka -> 5s OHLC/VWAP -> Mongo + JSONL (streaming)
+  to_structured.py     Mongo -> schema-enforced Parquet (batch, on demand)
   Dockerfile           apache/spark plus pymongo
-output/                live_ohlc.jsonl (gitignored)
+output/                live_ohlc.jsonl and structured/ (gitignored)
 ```
 
-The Spark checkpoint lives in the `spark-checkpoint` named volume, not in the
-repo.
+State lives in three named volumes, not in the repo: `kafka-data` (the broker's
+log), `mongo-data` and `spark-checkpoint`. They are deleted together by
+`down -v` and by nothing else — the checkpoint records Kafka offsets, so
+removing one without the other leaves Spark asking for offsets that no longer
+exist.
 
 ## Design notes
 

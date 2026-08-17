@@ -22,6 +22,13 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      # Persist the log outside the container. This has to match the lifetime of
+      # the Spark checkpoint: the checkpoint remembers Kafka offsets, so if the
+      # broker's log is wiped while the checkpoint survives, Spark asks for
+      # offsets that no longer exist and the query fails with
+      # "Some data may have been lost". Both now live in named volumes and are
+      # only removed together, by "down -v".
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
       # Single node, so every internal topic uses replication factor 1
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
@@ -35,6 +42,10 @@ services:
       timeout: 10s
       retries: 15
       start_period: 20s
+    volumes:
+      # The image already owns /var/lib/kafka/data as appuser, so a fresh named
+      # volume inherits that and the unprivileged broker can write to it.
+      - kafka-data:/var/lib/kafka/data
     restart: unless-stopped
 
   # --------------------------------------------------------------------------
@@ -110,6 +121,7 @@ services:
       MONGO_DB: ${MONGO_DB}
       MONGO_COLLECTION: ${MONGO_COLLECTION}
       OUTPUT_PATH: /app/output/live_ohlc.jsonl
+      JSONL_MAX_LINES: ${JSONL_MAX_LINES}
       CHECKPOINT_PATH: /checkpoint/ohlc
     ports:
       # Spark's own web UI: micro-batch durations, input rate, query plan.
@@ -187,5 +199,6 @@ services:
     restart: unless-stopped
 
 volumes:
+  kafka-data:
   mongo-data:
   spark-checkpoint:

@@ -5,12 +5,22 @@ folds them into one row per symbol per 5-second window: trade count, volume,
 VWAP and the four OHLC prices. Each finished window is written to MongoDB and
 appended to a JSON Lines file.
 
+The JSON Lines file keeps only the most recent JSONL_MAX_LINES rows. It is a
+live tail for watching the stream by eye, not the record of truth - MongoDB is.
+Left unbounded it grows at roughly 560 KB/hour, about 400 MB a month, for data
+that is already stored properly next door. Trimming happens in place once the
+file overshoots the limit by JSONL_TRIM_SLACK, not on every batch: rewriting
+megabytes every five seconds would cost more than the file is worth. A reader
+tailing the file will see it jump at that moment, which is the accepted
+trade-off.
+
 Runs inside the container defined as the `spark` service, so it talks to the
 broker over the INTERNAL listener (kafka:9092).
 """
 
 import json
 import os
+from collections import deque
 
 from pymongo import MongoClient, UpdateOne
 from pyspark.sql import SparkSession
@@ -37,6 +47,12 @@ MONGO_URI = os.environ.get("MONGO_URI", "mongodb://mongo:27017")
 MONGO_DB = os.environ.get("MONGO_DB", "realtime")
 MONGO_COLLECTION = os.environ.get("MONGO_COLLECTION", "trade_ohlc")
 OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "/app/output/live_ohlc.jsonl")
+# How many lines the JSONL tail keeps. At three windows per five seconds this is
+# a few hours of history in a couple of megabytes.
+JSONL_MAX_LINES = int(os.environ.get("JSONL_MAX_LINES", "10000"))
+# Allowed overshoot before a trim runs, so the rewrite happens every few
+# thousand lines instead of every batch.
+JSONL_TRIM_SLACK = 1000
 # Where Spark stores the committed Kafka offsets and the window state. With it
 # the query resumes where it left off instead of replaying the whole topic.
 CHECKPOINT_PATH = os.environ.get("CHECKPOINT_PATH", "/checkpoint/ohlc")
@@ -79,9 +95,16 @@ raw = (
     .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
     .option("subscribe", KAFKA_TOPIC)
     # Read the topic from the beginning. This option only applies to a query
-    # that has no checkpoint yet; once step 5 adds a checkpoint the stream
-    # resumes from its stored offsets instead.
+    # that has no checkpoint yet; with a checkpoint the stream resumes from its
+    # stored offsets instead.
     .option("startingOffsets", "earliest")
+    # Do not kill the query when a committed offset is gone from Kafka - skip to
+    # the earliest one still available and carry on. Without this, anything that
+    # truncates the broker's log while the checkpoint survives (retention
+    # deleting old segments, or a wiped broker) fails the query permanently, and
+    # with restart: unless-stopped that becomes a crash loop. Mongo upserts are
+    # idempotent, so re-reading whatever is left costs nothing.
+    .option("failOnDataLoss", "false")
     .load()
 )
 
@@ -140,6 +163,40 @@ ohlc = (
 # reused across batches.
 collection = MongoClient(MONGO_URI)[MONGO_DB][MONGO_COLLECTION]
 
+# Line count of the JSONL tail, so a trim decision costs nothing per batch.
+# Counted from the file once, on the first write after startup.
+jsonl_lines = None
+
+
+def append_to_tail(rows):
+    """Append rows to the JSONL tail and trim it back when it overshoots."""
+    global jsonl_lines
+    if jsonl_lines is None:
+        try:
+            with open(OUTPUT_PATH, "r", encoding="utf-8") as handle:
+                jsonl_lines = sum(1 for _ in handle)
+        except FileNotFoundError:
+            jsonl_lines = 0
+
+    with open(OUTPUT_PATH, "a", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, default=str) + "\n")
+    jsonl_lines += len(rows)
+
+    if jsonl_lines <= JSONL_MAX_LINES + JSONL_TRIM_SLACK:
+        return
+
+    # deque with maxlen keeps only the tail in memory, whatever the file size.
+    with open(OUTPUT_PATH, "r", encoding="utf-8") as handle:
+        kept = deque(handle, maxlen=JSONL_MAX_LINES)
+    # Rewritten in place rather than through a temp file and rename: this is a
+    # throwaway tail, and a brief partial read is cheaper than the extra
+    # failure modes a rename across a bind mount can introduce.
+    with open(OUTPUT_PATH, "w", encoding="utf-8") as handle:
+        handle.writelines(kept)
+    jsonl_lines = len(kept)
+    print(f"trimmed the JSONL tail to its last {jsonl_lines} lines", flush=True)
+
 
 def write_batch(batch_df, batch_id):
     """Write one micro-batch to both sinks.
@@ -168,13 +225,11 @@ def write_batch(batch_df, batch_id):
         ordered=False,
     )
 
-    # JSON Lines, append. Deliberately not writeStream.format("json"): the
+    # JSON Lines tail, bounded. Deliberately not writeStream.format("json"): the
     # built-in sink spreads output over many part-*.json files, while what is
     # wanted here is one readable file that grows live. Note this file is the
     # one place a replayed batch does show up twice; Mongo stays correct.
-    with open(OUTPUT_PATH, "a", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, default=str) + "\n")
+    append_to_tail(rows)
 
     print(f"batch {batch_id}: wrote {len(rows)} windows", flush=True)
 
