@@ -35,6 +35,7 @@ services:
       timeout: 10s
       retries: 15
       start_period: 20s
+    restart: unless-stopped
 
   # --------------------------------------------------------------------------
   # One-shot service that creates the topic idempotently (--if-not-exists).
@@ -58,8 +59,31 @@ services:
     restart: "no"
 
   # --------------------------------------------------------------------------
-  # Spark Structured Streaming — reads the topic and (from step 5 on) writes to
-  # Mongo and to output/live_ohlc.jsonl.
+  # Producer — polls the Binance REST API and publishes trades to Kafka.
+  # No volumes: it holds no state on disk. The fromId watermark lives in memory
+  # and is reseeded from the latest trade on start, so a restart resumes live
+  # rather than replaying history.
+  # --------------------------------------------------------------------------
+  producer:
+    build:
+      context: ./producer
+    image: rtp-producer:1.0
+    container_name: rtp-producer
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      # The INTERNAL listener. ${KAFKA_BOOTSTRAP} in .env points at
+      # localhost:29092, which is only meaningful for a producer run on the host.
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_TOPIC: ${KAFKA_TOPIC}
+      SYMBOLS: ${SYMBOLS}
+      POLL_INTERVAL_SEC: ${POLL_INTERVAL_SEC}
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------------
+  # Spark Structured Streaming — reads the topic, aggregates 5-second windows
+  # and writes them to Mongo and to output/live_ohlc.jsonl.
   #
   # Spark runs in a container rather than on the host on purpose: PySpark
   # checkpointing on Windows needs winutils.exe/hadoop.dll, which would also
@@ -116,8 +140,13 @@ services:
       # Pin the Ivy home so it resolves to the bind-mounted cache above
       - --conf
       - spark.jars.ivy=/opt/spark/.ivy2
+      # Shuffle partitions default to 200, which meant every micro-batch spawned
+      # a 200-task stage to produce one row per symbol. 8 leaves room for more
+      # symbols while staying close to the 4 available threads.
+      - --conf
+      - spark.sql.shuffle.partitions=8
       - /app/stream_job.py
-    restart: "no"
+    restart: unless-stopped
 
   # --------------------------------------------------------------------------
   # MongoDB — the NoSQL sink of the pipeline.
@@ -137,6 +166,7 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
+    restart: unless-stopped
 
   # --------------------------------------------------------------------------
   # Kafka UI — browse topics and messages from the browser (debug only, the
@@ -154,6 +184,7 @@ services:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
       DYNAMIC_CONFIG_ENABLED: "true"
+    restart: unless-stopped
 
 volumes:
   mongo-data:

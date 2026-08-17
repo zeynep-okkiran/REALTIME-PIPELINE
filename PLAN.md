@@ -13,7 +13,9 @@
 | 3 | Spark job iskeleti (uçtan uca akış) | ✅ Tamam, doğrulandı |
 | 4 | Transform: şema + pencereli agregasyon | ✅ Tamam, doğrulandı |
 | 5 | Sink: MongoDB + geçici JSON dosyası | ✅ Tamam, doğrulandı |
-| 6 | Tam containerize + Linux'a taşıma | ⏭️ Sıradaki |
+| 6 | Tam containerize + Linux'a taşıma | ✅ Tamam, doğrulandı |
+
+**Plan tamamlandı.** Tek komutla ayağa kalkıyor: `docker compose up -d`
 
 ---
 
@@ -319,7 +321,7 @@ Batch aralıkları temiz 5.0 sn (pencere üretmeyen batch'lerde 10 sn, bu yavaş
 
 ---
 
-## Adım 6 — Tam containerize + Linux'a taşıma
+## Adım 6 — Tam containerize + Linux'a taşıma ✅
 
 - `producer/Dockerfile` (`python:3.12-slim` + requirements) eklenir, producer compose'a
   servis olarak girer; `KAFKA_BOOTSTRAP` artık `kafka:9092`
@@ -336,12 +338,43 @@ Batch aralıkları temiz 5.0 sn (pencere üretmeyen batch'lerde 10 sn, bu yavaş
 - Linux notu: bind-mount edilen `output/` ve `checkpoint/` dizinlerinde root-owned dosya
   oluşmaması için compose'daki ilgili servislere `user:` eklenir
 
-**Doğrulama (uçtan uca, temiz kurulum simülasyonu):**
-```bash
-docker compose down -v && rm -rf output checkpoint
-docker compose up -d
-# ~1 dk sonra: Mongo'da doküman var, output/live_ohlc.jsonl büyüyor
+**Doğrulama — temiz kurulum simülasyonu gerçekten yapıldı:**
+
 ```
+docker compose down -v   (mongo-data ve spark-checkpoint volume'leri silindi)
+rm -rf output
+docker compose build     (rtp-spark + rtp-producer)
+docker compose up -d     -> 8.1 saniyede döndü
+```
+
+| Kontrol | Sonuç |
+|---|---|
+| Servis sayısı | **6/6** ayakta (`kafka-init` işini yapıp `Exited (0)`) |
+| Topic | `binance.trades.raw`, **3 partition**, otomatik oluştu |
+| Producer | **Container içinde** çalışıyor, 2 dk'da 2.430 işlem |
+| Spark | batch 24, tur başına 3 pencere |
+| Mongo | 70 doküman |
+| `output/live_ohlc.jsonl` | 70 satır — Mongo ile **birebir** |
+| `localhost:8080` / `localhost:4040` | HTTP 200 |
+| Başarısız job | **0** |
+
+### Plandan sapmalar
+
+1. **`spark.sql.shuffle.partitions=8` eklendi** (planda yoktu). Spark UI'da profil çıkarınca
+   her mikro-batch'in **200 görevlik** bir aşama açtığı görüldü — üretilen sonuç 3 satır.
+   Sebebi Spark'ın varsayılanının 200 olması ve bizim hiç ayarlamamış olmamız.
+   8'e indirince: **200 → 8 görev**, aşama süresi **~6000 ms → ~360 ms**.
+2. **`restart: unless-stopped`** beş uzun ömürlü servise eklendi; `kafka-init` tek seferlik
+   iş olduğu için `restart: "no"` kaldı. Politikanın bu kurulumda işlediği kullan-at bir
+   container'la doğrulandı (yeniden başlama sayacı 1→2→4→5).
+   ⚠️ Not: `docker kill` / `docker stop` Docker tarafında **elle durdurma** sayılır ve
+   politikayı bilerek devre dışı bırakır — bu yüzden politika bu komutlarla test edilemez.
+   Container'ın PID 1'i de kendi içinden gelen SIGKILL'e karşı çekirdek tarafından korunur.
+3. **`user:` eklenmedi.** Planın amacı bind-mount edilen dizinde root sahipli dosya
+   oluşmasını engellemekti. İki imaj da zaten yetkisiz kullanıcıyla çalışıyor (Spark uid 185,
+   producer uid 1000), yani sorun hiç doğmuyor. Linux'ta dosyaların kendi kullanıcına
+   geçmesini istersen `chown` tek satırı README'de. Ayrıca `checkpoint/` artık named volume
+   olduğu için o taraf tamamen gündemden düştü.
 
 → **DUR, commit.**
 
