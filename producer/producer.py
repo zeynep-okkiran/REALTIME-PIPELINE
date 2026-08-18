@@ -259,6 +259,16 @@ def main() -> int:
                 log.warning("%s request failed: %s; retrying in %.0fs", symbol, exc, backoff)
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 60)
+            except Exception:
+                # Deliberately broad. Anything unexpected here - a Binance
+                # response missing a field, a BufferError that survived the
+                # flush - would otherwise kill the process, and a restart
+                # reseeds the watermark from the latest trade, so every trade
+                # between the crash and the restart is silently lost. Skipping
+                # one symbol for one cycle costs nothing by comparison: its
+                # watermark is untouched, so the next cycle picks up exactly
+                # where this one stopped. The traceback is logged in full.
+                log.exception("%s failed unexpectedly; skipping this cycle", symbol)
 
         total += sum(counts.values())
         producer.poll(0)  # serve delivery callbacks

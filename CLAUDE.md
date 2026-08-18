@@ -314,6 +314,16 @@ and Linux.
 duplicate a record. A single `Coordinator load in progress: retrying` warning at startup
 is normal — the broker has only just come up.
 
+**One symbol's failure never kills the loop.** Beyond the specific handlers for rate limits
+and network errors, the per-symbol call is wrapped in a broad `except Exception` that logs
+the traceback and moves on. This looks like the anti-pattern it usually is, but here the
+alternative is worse: an unhandled error kills the process, `restart: unless-stopped`
+brings it back, and the producer reseeds its watermark from the *latest* trade — so every
+trade between the crash and the restart is silently lost. Skipping one symbol for one cycle
+leaves its watermark untouched, so the next cycle resumes exactly where this one stopped.
+This is the only place in the pipeline where data could go missing without a trace;
+everywhere else a checkpoint, an idempotent upsert or `failOnDataLoss` covers it.
+
 ### Kafka
 
 **KRaft mode, no Zookeeper**, single node — simplicity.
@@ -549,6 +559,14 @@ directory name.
 
 **`to_structured.py` is a batch job.** It produces a snapshot and replaces the previous
 one with `mode("overwrite")`. Continuous freshness would need scheduled runs.
+
+**MongoDB is the one store that still grows without bound**, now that the JSONL tail is
+capped. Measured at 241 bytes per document and 36 documents per minute with three symbols:
+roughly **12 MB a day, 4.5 GB a year**. That is intended — Mongo is the record of truth and
+nothing should silently delete from it — but a long-running deployment needs a plan:
+a TTL index on `window_start`, periodic archival to Parquet (which `to_structured.py`
+already produces), or rolling the collection by month. The only index is the default one on
+`_id`; since `_id` is `symbol|window_start`, prefix queries by symbol already use it.
 
 **Mongo does not enforce a schema** — the `$jsonSchema` validator was deliberately not
 added. A wrongly typed document can get into Mongo; `to_structured.py` catches it on read.
